@@ -1,0 +1,215 @@
+using System.Runtime.InteropServices;
+using LibreHardwareMonitor.Hardware;
+using Microsoft.Win32;
+
+namespace PCStatus.Sensors;
+
+/// <summary>Owns all sensor sources and produces one <see cref="SensorSnapshot"/> per call.</summary>
+public sealed class SensorService : IDisposable
+{
+    // Any source can be missing on some machines (no GPU, VMs, disabled perf counters); degrade instead of failing.
+    private readonly PdhCounters? _pdh = TryCreate(() => new PdhCounters());
+    private readonly List<GpuInfo> _gpus = TryCreate(GpuEnumerator.Enumerate) ?? [];
+    private readonly CpuTimes _cpuTimes = new();
+    private readonly bool _pawnIoInstalled = IsPawnIoInstalled();
+
+    private Computer? _lhm;
+    private Computer? _lhmCpuComputer;
+    private IHardware? _lhmCpu;
+    private readonly Dictionary<long, IHardware> _lhmGpuByLuid = new();
+    private volatile bool _lhmReady;
+
+    private static readonly TimeSpan GpuTempHold = TimeSpan.FromSeconds(30);
+    private readonly Dictionary<long, (float temp, DateTime at)> _lastGpuTemp = new();
+
+    public IReadOnlyList<GpuInfo> Gpus => _gpus;
+
+    public SensorService()
+    {
+        // LHM's Open() can take a second or two; don't block startup.
+        Task.Run(InitLhm);
+    }
+
+    private void InitLhm()
+    {
+        try
+        {
+            // Separate Computer instances: one combined instance used ~4x the memory of both apart.
+            var cpuComputer = new Computer { IsCpuEnabled = true };
+            cpuComputer.Open();
+            _lhmCpuComputer = cpuComputer;
+            _lhmCpu = cpuComputer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
+
+            var c = new Computer { IsGpuEnabled = true };
+            c.Open();
+            var lhmGpus = c.Hardware.Where(h => h.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuIntel or HardwareType.GpuAmd).ToList();
+            foreach (var g in _gpus)
+            {
+                var type = g.VendorId switch
+                {
+                    GpuEnumerator.VendorNvidia => HardwareType.GpuNvidia,
+                    GpuEnumerator.VendorIntel => HardwareType.GpuIntel,
+                    GpuEnumerator.VendorAmd => HardwareType.GpuAmd,
+                    _ => (HardwareType?)null,
+                };
+                var candidates = lhmGpus.Where(h => h.HardwareType == type && !_lhmGpuByLuid.ContainsValue(h)).ToList();
+                var match = candidates.FirstOrDefault(h => NamesMatch(h.Name, g.Name)) ?? (candidates.Count == 1 ? candidates[0] : null);
+                if (match != null)
+                    _lhmGpuByLuid[g.Luid] = match;
+            }
+            _lhm = c;
+            _lhmReady = true;
+        }
+        catch
+        {
+            // Temperatures simply stay unavailable.
+        }
+    }
+
+    private static bool NamesMatch(string a, string b) =>
+        a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase);
+
+    public SensorSnapshot Sample()
+    {
+        _pdh?.Collect();
+        float cpuFallback = _cpuTimes.Percent();
+        float cpu = _pdh?.HasCpuCounter == true ? _pdh.CpuPercent() : cpuFallback;
+        var load = _pdh?.GpuLoadByLuid() ?? [];
+        var dedicated = _pdh?.GpuDedicatedBytes() ?? [];
+        var shared = _pdh?.GpuSharedBytes() ?? [];
+
+        float? cpuTemp = null;
+        if (_lhmReady && _lhmCpu != null)
+        {
+            try
+            {
+                _lhmCpu.Update();
+                cpuTemp = PickCpuTemp(_lhmCpu);
+            }
+            catch { }
+        }
+
+        var gpus = new List<GpuReading>(_gpus.Count);
+        foreach (var g in _gpus)
+        {
+            float l = load.GetValueOrDefault(g.Luid);
+            double used = g.IsIntegrated ? shared.GetValueOrDefault(g.Luid) : dedicated.GetValueOrDefault(g.Luid);
+            double total = g.IsIntegrated ? g.SharedGB : g.DedicatedGB;
+
+            float? temp = null;
+            bool skippedIdle = false;
+            if (_lhmReady && _lhmGpuByLuid.TryGetValue(g.Luid, out var hw))
+            {
+                // Querying a powered-down hybrid dGPU wakes it up, so only ask while it's doing work.
+                // Keep showing the last reading for a while so the value doesn't flicker to "idle".
+                if (!g.IsIntegrated && l < 0.5f)
+                {
+                    if (_lastGpuTemp.TryGetValue(g.Luid, out var lastTemp) && DateTime.UtcNow - lastTemp.at < GpuTempHold)
+                        temp = lastTemp.temp;
+                    else
+                        skippedIdle = true;
+                }
+                else
+                {
+                    try
+                    {
+                        hw.Update();
+                        temp = PickGpuTemp(hw);
+                        if (temp is { } t)
+                            _lastGpuTemp[g.Luid] = (t, DateTime.UtcNow);
+                    }
+                    catch { }
+                }
+            }
+            gpus.Add(new GpuReading(g, l, temp, skippedIdle, used / 1073741824.0, total));
+        }
+
+        var (ramPct, ramUsed, ramTotal) = ReadRam();
+        return new SensorSnapshot(cpu, cpuTemp, ramPct, ramUsed, ramTotal, gpus, _pawnIoInstalled);
+    }
+
+    private static float? PickCpuTemp(IHardware cpu)
+    {
+        var temps = cpu.Sensors.Where(s => s.SensorType == SensorType.Temperature && s.Value is > 0 and < 150).ToList();
+        return (temps.FirstOrDefault(s => s.Name.Contains("Package", StringComparison.OrdinalIgnoreCase))
+             ?? temps.FirstOrDefault(s => s.Name.Contains("Core Max", StringComparison.OrdinalIgnoreCase))
+             ?? temps.FirstOrDefault(s => s.Name.Contains("Tctl", StringComparison.OrdinalIgnoreCase))
+             ?? temps.FirstOrDefault())?.Value;
+    }
+
+    private static float? PickGpuTemp(IHardware gpu)
+    {
+        var temps = gpu.Sensors.Where(s => s.SensorType == SensorType.Temperature && s.Value is > 0 and < 150).ToList();
+        return (temps.FirstOrDefault(s => s.Name.Equals("GPU Core", StringComparison.OrdinalIgnoreCase))
+             ?? temps.FirstOrDefault())?.Value;
+    }
+
+    private static (float pct, double usedGB, double totalGB) ReadRam()
+    {
+        var m = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+        if (!GlobalMemoryStatusEx(ref m))
+            return (0, 0, 0);
+        double total = m.ullTotalPhys / 1073741824.0;
+        double used = (m.ullTotalPhys - m.ullAvailPhys) / 1073741824.0;
+        return ((float)(used / total * 100), used, total);
+    }
+
+    private static bool IsPawnIoInstalled()
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\PawnIO");
+        return key != null;
+    }
+
+    private static T? TryCreate<T>(Func<T> create) where T : class
+    {
+        try { return create(); }
+        catch { return null; }
+    }
+
+    /// <summary>CPU % from GetSystemTimes — fallback when the PDH counter isn't available.</summary>
+    private sealed class CpuTimes
+    {
+        private ulong _idle, _kernel, _user;
+
+        public float Percent()
+        {
+            if (!GetSystemTimes(out var idle, out var kernel, out var user))
+                return 0;
+            ulong dIdle = idle - _idle, dKernel = kernel - _kernel, dUser = user - _user;
+            bool first = _kernel == 0;
+            (_idle, _kernel, _user) = (idle, kernel, user);
+            ulong total = dKernel + dUser; // kernel time includes idle time
+            if (first || total == 0) return 0;
+            return (float)Math.Clamp((total - dIdle) * 100.0 / total, 0, 100);
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out ulong idle, out ulong kernel, out ulong user);
+    }
+
+    public void Dispose()
+    {
+        _pdh?.Dispose();
+        try { _lhm?.Close(); } catch { }
+        try { _lhmCpuComputer?.Close(); } catch { }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX buffer);
+}
