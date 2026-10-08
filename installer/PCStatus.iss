@@ -53,7 +53,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "--enable-autostart"; Tasks: autostart; Flags: runhidden waituntilterminated; StatusMsg: "Registering autostart..."
 ; With autostart, start through the task: it runs in the signed-in user's session, elevated without a UAC prompt.
-Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""{#AppName}"""; Tasks: autostart; Description: "Launch {#AppName}"; Flags: postinstall runhidden skipifsilent
+; runascurrentuser: postinstall entries default to the unelevated original user, who gets "Access is denied" on /Run.
+Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""{#AppName}"""; Tasks: autostart; Description: "Launch {#AppName}"; Flags: postinstall runhidden skipifsilent runascurrentuser
 Filename: "{app}\{#AppExe}"; Tasks: not autostart; Description: "Launch {#AppName}"; Flags: postinstall nowait shellexec skipifsilent
 
 [UninstallRun]
