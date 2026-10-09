@@ -2,6 +2,10 @@
 
 A tiny Windows tray app that shows live **CPU, GPU, RAM and network usage** as mini bars right in the taskbar's system tray, with a click-open panel for details.
 
+![PCStatus in the system tray: one bar each for CPU, every GPU, RAM, and network](docs/tray.png)
+
+Click the icon for the detail panel:
+
 ![PCStatus panel](docs/panel.png)
 
 ## Features
