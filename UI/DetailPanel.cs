@@ -3,7 +3,12 @@ using System.Runtime.InteropServices;
 
 namespace PCStatus.UI;
 
-public sealed record PanelRow(string Title, string Value, string Detail, History History, Color Accent, float Load);
+/// <summary>
+/// One panel row. With <paramref name="DownHistory"/> set, the sparkline is mirrored like the tray bar:
+/// <paramref name="History"/> (upload) above the centre line in <paramref name="Accent"/>, download below in <paramref name="DownAccent"/>.
+/// </summary>
+public sealed record PanelRow(string Title, string Value, string Detail, History History, Color Accent, float Load,
+    History? DownHistory = null, Color DownAccent = default);
 
 /// <summary>Borderless popup shown above the tray: one row per metric with a 60 s sparkline.</summary>
 public sealed class DetailPanel : Form
@@ -163,7 +168,10 @@ public sealed class DetailPanel : Form
                 new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap });
 
             var spark = new RectangleF(pad, y + (RowHeight - SparkHeight) * s, innerW, SparkHeight * s);
-            DrawSparkline(g, spark, row.History, row.Accent, s);
+            if (row.DownHistory != null)
+                DrawMirroredSparkline(g, spark, row.History, row.Accent, row.DownHistory, row.DownAccent, s);
+            else
+                DrawSparkline(g, spark, row.History, row.Accent, s);
 
             y += (RowHeight + RowGap) * s;
         }
@@ -195,6 +203,40 @@ public sealed class DetailPanel : Form
             g.FillPolygon(fill, poly);
         using (var line = new Pen(accent, 1.5f * s) { LineJoin = LineJoin.Round })
             g.DrawLines(line, pts);
+    }
+
+    /// <summary>Upload above the centre line, download below; values are 0–100 (already log-scaled).</summary>
+    private static void DrawMirroredSparkline(Graphics g, RectangleF r, History up, Color upColor, History down, Color downColor, float s)
+    {
+        using (var bg = new SolidBrush(Color.FromArgb(26, 26, 26)))
+            g.FillRectangle(bg, r);
+        float mid = r.Top + r.Height / 2;
+        using (var grid = new Pen(Theme.SparkGrid, 1))
+            g.DrawLine(grid, r.Left, mid, r.Right, mid);
+
+        DrawHalf(up, upColor, -1);
+        DrawHalf(down, downColor, +1);
+
+        void DrawHalf(History h, Color color, int dir)
+        {
+            if (h.Count < 2) return;
+            float step = r.Width / (h.Capacity - 1);
+            float half = r.Height / 2 - s;
+            var pts = new PointF[h.Count];
+            for (int i = 0; i < h.Count; i++)
+            {
+                float x = r.Right - (h.Count - 1 - i) * step;
+                pts[i] = new PointF(x, mid + dir * Math.Clamp(h[i], 0, 100) / 100f * half);
+            }
+            var poly = new PointF[pts.Length + 2];
+            pts.CopyTo(poly, 0);
+            poly[^2] = new PointF(pts[^1].X, mid);
+            poly[^1] = new PointF(pts[0].X, mid);
+            using (var fill = new SolidBrush(Color.FromArgb(55, color)))
+                g.FillPolygon(fill, poly);
+            using (var line = new Pen(color, 1.5f * s) { LineJoin = LineJoin.Round })
+                g.DrawLines(line, pts);
+        }
     }
 
     protected override void Dispose(bool disposing)

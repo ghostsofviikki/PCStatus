@@ -9,15 +9,21 @@ public sealed class SensorService : IDisposable
 {
     // Any source can be missing on some machines (no GPU, VMs, disabled perf counters); degrade instead of failing.
     private readonly PdhCounters? _pdh = TryCreate(() => new PdhCounters());
-    private readonly List<GpuInfo> _gpus = TryCreate(GpuEnumerator.Enumerate) ?? [];
+    // GPUs can come and go (eGPU plugged in or out), so the list is re-scanned every few seconds.
+    private List<GpuInfo> _gpus = TryCreate(GpuEnumerator.Enumerate) ?? [];
+    private DateTime _nextGpuScan = DateTime.UtcNow + GpuScanInterval;
+    private static readonly TimeSpan GpuScanInterval = TimeSpan.FromSeconds(5);
     private readonly CpuTimes _cpuTimes = new();
+    private readonly NetworkCounters _net = new();
     private readonly bool _pawnIoInstalled = IsPawnIoInstalled();
 
-    private Computer? _lhm;
     private Computer? _lhmCpuComputer;
     private IHardware? _lhmCpu;
-    private readonly Dictionary<long, IHardware> _lhmGpuByLuid = new();
-    private volatile bool _lhmReady;
+    private volatile bool _lhmCpuReady;
+    // Replaced as a whole (never mutated) when GPUs change, so the sampling thread always sees a consistent pair.
+    private volatile LhmGpus? _lhmGpus;
+    private sealed record LhmGpus(Computer Computer, Dictionary<long, IHardware> ByLuid);
+    private int _lhmGpuInitRunning;
 
     private static readonly TimeSpan GpuTempHold = TimeSpan.FromSeconds(30);
     private readonly Dictionary<long, (float temp, DateTime at)> _lastGpuTemp = new();
@@ -27,23 +33,61 @@ public sealed class SensorService : IDisposable
     public SensorService()
     {
         // LHM's Open() can take a second or two; don't block startup.
-        Task.Run(InitLhm);
+        Task.Run(InitLhmCpu);
+        StartLhmGpuInit(_gpus);
     }
 
-    private void InitLhm()
+    private void InitLhmCpu()
     {
         try
         {
-            // Separate Computer instances: one combined instance used ~4x the memory of both apart.
+            // Separate Computer instances for CPU and GPU: one combined instance used ~4x the memory of both apart.
             var cpuComputer = new Computer { IsCpuEnabled = true };
             cpuComputer.Open();
             _lhmCpuComputer = cpuComputer;
             _lhmCpu = cpuComputer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
+            _lhmCpuReady = true;
+        }
+        catch
+        {
+            // CPU temperature simply stays unavailable.
+        }
+    }
 
-            var c = new Computer { IsGpuEnabled = true };
+    private void StartLhmGpuInit(List<GpuInfo> gpus)
+    {
+        if (Interlocked.Exchange(ref _lhmGpuInitRunning, 1) == 1)
+        {
+            _gpuRescanPending = true; // picked up when the running init finishes
+            return;
+        }
+        Task.Run(() =>
+        {
+            try { InitLhmGpus(gpus); }
+            finally
+            {
+                Interlocked.Exchange(ref _lhmGpuInitRunning, 0);
+                if (_gpuRescanPending)
+                {
+                    _gpuRescanPending = false;
+                    StartLhmGpuInit(_gpus);
+                }
+            }
+        });
+    }
+
+    private volatile bool _gpuRescanPending;
+
+    private void InitLhmGpus(List<GpuInfo> gpus)
+    {
+        Computer? c = null;
+        try
+        {
+            c = new Computer { IsGpuEnabled = true };
             c.Open();
+            var byLuid = new Dictionary<long, IHardware>();
             var lhmGpus = c.Hardware.Where(h => h.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuIntel or HardwareType.GpuAmd).ToList();
-            foreach (var g in _gpus)
+            foreach (var g in gpus)
             {
                 var type = g.VendorId switch
                 {
@@ -52,18 +96,42 @@ public sealed class SensorService : IDisposable
                     GpuEnumerator.VendorAmd => HardwareType.GpuAmd,
                     _ => (HardwareType?)null,
                 };
-                var candidates = lhmGpus.Where(h => h.HardwareType == type && !_lhmGpuByLuid.ContainsValue(h)).ToList();
+                var candidates = lhmGpus.Where(h => h.HardwareType == type && !byLuid.ContainsValue(h)).ToList();
                 var match = candidates.FirstOrDefault(h => NamesMatch(h.Name, g.Name)) ?? (candidates.Count == 1 ? candidates[0] : null);
                 if (match != null)
-                    _lhmGpuByLuid[g.Luid] = match;
+                    byLuid[g.Luid] = match;
             }
-            _lhm = c;
-            _lhmReady = true;
+            var old = _lhmGpus;
+            _lhmGpus = new LhmGpus(c, byLuid);
+            c = null;
+            // Give an in-flight Sample() a moment to finish with the old instance before closing it.
+            if (old != null)
+                Task.Delay(TimeSpan.FromSeconds(3)).ContinueWith(_ => { try { old.Computer.Close(); } catch { } });
         }
         catch
         {
-            // Temperatures simply stay unavailable.
+            // GPU temperatures simply stay unavailable.
         }
+        finally
+        {
+            try { c?.Close(); } catch { }
+        }
+    }
+
+    /// <summary>Re-enumerates GPUs; when the set changes, LHM is re-opened so new GPUs get temperatures.</summary>
+    private void RescanGpusIfDue()
+    {
+        if (DateTime.UtcNow < _nextGpuScan) return;
+        _nextGpuScan = DateTime.UtcNow + GpuScanInterval;
+
+        var fresh = TryCreate(GpuEnumerator.Enumerate);
+        if (fresh == null) return;
+        if (fresh.Select(g => g.Luid).SequenceEqual(_gpus.Select(g => g.Luid))) return;
+
+        _gpus = fresh;
+        foreach (var gone in _lastGpuTemp.Keys.Where(l => fresh.All(g => g.Luid != l)).ToList())
+            _lastGpuTemp.Remove(gone);
+        StartLhmGpuInit(fresh);
     }
 
     private static bool NamesMatch(string a, string b) =>
@@ -71,6 +139,7 @@ public sealed class SensorService : IDisposable
 
     public SensorSnapshot Sample()
     {
+        RescanGpusIfDue();
         _pdh?.Collect();
         float cpuFallback = _cpuTimes.Percent();
         float cpu = _pdh?.HasCpuCounter == true ? _pdh.CpuPercent() : cpuFallback;
@@ -79,7 +148,7 @@ public sealed class SensorService : IDisposable
         var shared = _pdh?.GpuSharedBytes() ?? [];
 
         float? cpuTemp = null;
-        if (_lhmReady && _lhmCpu != null)
+        if (_lhmCpuReady && _lhmCpu != null)
         {
             try
             {
@@ -89,6 +158,7 @@ public sealed class SensorService : IDisposable
             catch { }
         }
 
+        var lhmGpus = _lhmGpus;
         var gpus = new List<GpuReading>(_gpus.Count);
         foreach (var g in _gpus)
         {
@@ -98,7 +168,7 @@ public sealed class SensorService : IDisposable
 
             float? temp = null;
             bool skippedIdle = false;
-            if (_lhmReady && _lhmGpuByLuid.TryGetValue(g.Luid, out var hw))
+            if (lhmGpus != null && lhmGpus.ByLuid.TryGetValue(g.Luid, out var hw))
             {
                 // Querying a powered-down hybrid dGPU wakes it up, so only ask while it's doing work.
                 // Keep showing the last reading for a while so the value doesn't flicker to "idle".
@@ -125,7 +195,12 @@ public sealed class SensorService : IDisposable
         }
 
         var (ramPct, ramUsed, ramTotal) = ReadRam();
-        return new SensorSnapshot(cpu, cpuTemp, ramPct, ramUsed, ramTotal, gpus, _pawnIoInstalled);
+
+        (double down, double up, string adapters) net = (0, 0, "");
+        try { net = _net.Sample(); } catch { }
+
+        return new SensorSnapshot(cpu, cpuTemp, ramPct, ramUsed, ramTotal, gpus, _pawnIoInstalled,
+            net.down, net.up, net.adapters);
     }
 
     private static float? PickCpuTemp(IHardware cpu)
@@ -191,7 +266,7 @@ public sealed class SensorService : IDisposable
     public void Dispose()
     {
         _pdh?.Dispose();
-        try { _lhm?.Close(); } catch { }
+        try { _lhmGpus?.Computer.Close(); } catch { }
         try { _lhmCpuComputer?.Close(); } catch { }
     }
 

@@ -16,7 +16,9 @@ public sealed class TrayApp : ApplicationContext
 
     private readonly History _cpuHistory = new();
     private readonly History _ramHistory = new();
-    private readonly List<History> _gpuHistories;
+    private readonly History _netUpHistory = new();   // log-scaled 0–100, see TrayBar.NetFraction
+    private readonly History _netDownHistory = new();
+    private readonly Dictionary<long, History> _gpuHistories = new(); // by adapter LUID; GPUs can come and go
     private readonly string _cpuName = ReadCpuName();
 
     private SensorSnapshot? _last;
@@ -25,7 +27,6 @@ public sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        _gpuHistories = _sensors.Gpus.Select(_ => new History()).ToList();
 
         _autostartItem = new ToolStripMenuItem("Start with Windows", null, OnToggleAutostart)
         {
@@ -39,7 +40,7 @@ public sealed class TrayApp : ApplicationContext
         _tray = new NotifyIcon
         {
             Text = "PCStatus",
-            Icon = _renderer.Render(new float[2 + _sensors.Gpus.Count], _lightTaskbar),
+            Icon = _renderer.Render(BuildBars(null, _sensors.Gpus.Count), _lightTaskbar),
             ContextMenuStrip = menu,
             Visible = true,
         };
@@ -76,33 +77,65 @@ public sealed class TrayApp : ApplicationContext
 
         _cpuHistory.Add(snap.CpuPct);
         _ramHistory.Add(snap.RamPct);
-        for (int i = 0; i < snap.Gpus.Count && i < _gpuHistories.Count; i++)
-            _gpuHistories[i].Add(snap.Gpus[i].LoadPct);
+        AddGpuSamples(_gpuHistories, snap);
+        _netUpHistory.Add(TrayBar.NetFraction(snap.NetUpBps) * 100);
+        _netDownHistory.Add(TrayBar.NetFraction(snap.NetDownBps) * 100);
 
-        var values = new List<float> { snap.CpuPct };
-        values.AddRange(snap.Gpus.Select(g => g.LoadPct));
-        values.Add(snap.RamPct);
-        _tray.Icon = _renderer.Render(values, _lightTaskbar);
+        _tray.Icon = _renderer.Render(BuildBars(snap, snap.Gpus.Count), _lightTaskbar);
         _tray.Text = BuildTooltip(snap);
 
         if (_panel.Visible)
             _panel.SetRows(BuildRows(snap));
     }
 
+    internal static void AddGpuSamples(Dictionary<long, History> histories, SensorSnapshot snap)
+    {
+        foreach (var g in snap.Gpus)
+        {
+            if (!histories.TryGetValue(g.Info.Luid, out var h))
+                histories[g.Info.Luid] = h = new History();
+            h.Add(g.LoadPct);
+        }
+        foreach (var gone in histories.Keys.Where(l => snap.Gpus.All(g => g.Info.Luid != l)).ToList())
+            histories.Remove(gone);
+    }
+
+    /// <summary>CPU, one bar per GPU, RAM, network. A null snapshot gives empty bars (startup).</summary>
+    internal static List<TrayBar> BuildBars(SensorSnapshot? s, int gpuCount)
+    {
+        var bars = new List<TrayBar> { TrayBar.ForLoad(s?.CpuPct ?? 0) };
+        for (int i = 0; i < gpuCount; i++)
+            bars.Add(TrayBar.ForLoad(s != null && i < s.Gpus.Count ? s.Gpus[i].LoadPct : 0));
+        bars.Add(TrayBar.ForLoad(s?.RamPct ?? 0));
+        bars.Add(TrayBar.ForNetwork(s?.NetUpBps ?? 0, s?.NetDownBps ?? 0));
+        return bars;
+    }
+
+    internal static string FormatRate(double bytesPerSec) => bytesPerSec switch
+    {
+        < 1024 => $"{bytesPerSec:0} B/s",
+        < 1024 * 1024 => $"{bytesPerSec / 1024:0} KB/s",
+        < 1024 * 1024 * 1024 => $"{bytesPerSec / (1024 * 1024):0.0} MB/s",
+        _ => $"{bytesPerSec / (1024 * 1024 * 1024):0.00} GB/s",
+    };
+
     private static string BuildTooltip(SensorSnapshot s)
     {
         var parts = new List<string> { $"CPU {s.CpuPct:0}%{Deg(s.CpuTempC)}" };
         parts.AddRange(s.Gpus.Select(g => $"{g.Info.ShortName} {g.LoadPct:0}%{Deg(g.TempC)}"));
         parts.Add($"RAM {s.RamPct:0}%");
+        parts.Add($"↓ {FormatRate(s.NetDownBps)} ↑ {FormatRate(s.NetUpBps)}");
         string text = string.Join(" | ", parts);
         return text.Length > 127 ? text[..127] : text;
 
         static string Deg(float? t) => t is { } v ? $" {v:0}°" : "";
     }
 
-    private List<PanelRow> BuildRows(SensorSnapshot s) => BuildRows(s, _cpuName, _cpuHistory, _gpuHistories, _ramHistory);
+    private List<PanelRow> BuildRows(SensorSnapshot s) =>
+        BuildRows(s, _cpuName, _cpuHistory, _gpuHistories, _ramHistory, _netUpHistory, _netDownHistory);
 
-    internal static List<PanelRow> BuildRows(SensorSnapshot s, string cpuName, History cpuHistory, List<History> gpuHistories, History ramHistory)
+    internal static List<PanelRow> BuildRows(SensorSnapshot s, string cpuName, History cpuHistory, Dictionary<long, History> gpuHistories,
+        History ramHistory, History netUpHistory, History netDownHistory)
     {
         var rows = new List<PanelRow>();
 
@@ -118,10 +151,15 @@ public sealed class TrayApp : ApplicationContext
                 ? $"{g.MemUsedGB:0.0} / {g.MemTotalGB:0.0} GB shared"
                 : $"{g.MemUsedGB:0.0} / {g.MemTotalGB:0.0} GB VRAM";
             var accent = Theme.AccentGpus[i % Theme.AccentGpus.Length];
-            rows.Add(new PanelRow(g.Info.ShortName, $"{g.LoadPct:0}%{temp}", $"{g.Info.Name} · {mem}", gpuHistories[i], accent, g.LoadPct));
+            var history = gpuHistories.TryGetValue(g.Info.Luid, out var h) ? h : new History();
+            rows.Add(new PanelRow(g.Info.ShortName, $"{g.LoadPct:0}%{temp}", $"{g.Info.Name} · {mem}", history, accent, g.LoadPct));
         }
 
         rows.Add(new PanelRow("RAM", $"{s.RamPct:0}%", $"{s.RamUsedGB:0.0} / {s.RamTotalGB:0.0} GB", ramHistory, Theme.AccentRam, s.RamPct));
+
+        string adapters = s.NetAdapters.Length > 0 ? s.NetAdapters : "No active network adapter";
+        rows.Add(new PanelRow("Network", $"↓ {FormatRate(s.NetDownBps)}   ↑ {FormatRate(s.NetUpBps)}",
+            $"{adapters} · ↑ upload above, ↓ download below", netUpHistory, Theme.NetUp, 0, netDownHistory, Theme.NetDown));
         return rows;
     }
 

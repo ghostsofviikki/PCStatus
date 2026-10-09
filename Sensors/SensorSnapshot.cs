@@ -15,4 +15,7 @@ public sealed record SensorSnapshot(
     double RamUsedGB,
     double RamTotalGB,
     IReadOnlyList<GpuReading> Gpus,
-    bool PawnIoInstalled);
+    bool PawnIoInstalled,
+    double NetDownBps,
+    double NetUpBps,
+    string NetAdapters);

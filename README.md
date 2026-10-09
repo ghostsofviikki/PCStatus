@@ -1,14 +1,15 @@
 # PCStatus
 
-A tiny Windows tray app that shows live **CPU, GPU and RAM usage** as mini bars right in the taskbar's system tray, with a click-open panel for details.
+A tiny Windows tray app that shows live **CPU, GPU, RAM and network usage** as mini bars right in the taskbar's system tray, with a click-open panel for details.
 
 ![PCStatus panel](docs/panel.png)
 
 ## Features
 
 - **Tray icon with live bars:** CPU, one bar per GPU, RAM. Each bar is green, yellow or red by load, and updates every second.
-- **Every GPU shown separately:** for example an integrated Intel Arc *and* a dedicated NVIDIA RTX. Works with any number of GPUs, including none.
-- **Detail panel:** click the icon to see usage %, CPU and GPU temperatures, VRAM / shared GPU memory, and a 60-second history graph for each.
+- **Network in a single bar:** upload grows up from the middle (violet) and download grows down from it (blue). It uses a log scale from 1 KB/s to 100 MB/s, so light browsing and big downloads both show. Only physical adapters are counted, so VPNs and virtual switches aren't double-counted.
+- **Every GPU shown separately:** for example an integrated Intel Arc *and* a dedicated or external NVIDIA RTX. Works with any number of GPUs, including none. GPUs that are plugged in or removed while it runs (eGPUs) appear and disappear within a few seconds.
+- **Detail panel:** click the icon to see usage %, CPU and GPU temperatures, VRAM / shared GPU memory, download and upload speed, and a 60-second history graph for each.
 - **Doesn't wake a sleeping laptop dGPU:** GPU temperature is only read while the GPU is in use.
 - **Start with Windows:** optional, with no UAC prompt at every logon.
 - **Lightweight:** about 50 MB RAM and well under 1% CPU.
@@ -35,7 +36,7 @@ On a standard (non-admin) account everything works except CPU temperature.
 
 | Action | Result |
 |---|---|
-| Hover the tray icon | Tooltip with all values |
+| Hover the tray icon | Tooltip with all values, e.g. `CPU 23% 54° \| Arc 4% \| RTX 12% 51° \| RAM 48% \| ↓ 12.3 MB/s ↑ 450 KB/s` |
 | Left-click | Open / close the detail panel |
 | Right-click | *Start with Windows* toggle, *Exit* |
 
@@ -59,6 +60,7 @@ dotnet build                     # debug build
 | GPU memory | PDH `\GPU Adapter Memory(*)` |
 | GPU list | DXGI adapters |
 | RAM | `GlobalMemoryStatusEx` |
+| Network | `GetIfTable2`, summed over physical (hardware) interfaces that are up |
 | Temperatures | LibreHardwareMonitorLib (CPU via PawnIO) |
 
 ## License

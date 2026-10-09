@@ -95,7 +95,9 @@ internal static class Program
 
         var cpuH = new History();
         var ramH = new History();
-        var gpuH = sensors.Gpus.Select(_ => new History()).ToList();
+        var gpuH = new Dictionary<long, History>();
+        var netUpH = new History();
+        var netDownH = new History();
         Sensors.SensorSnapshot? last = null;
         for (int i = 0; i < 8; i++)
         {
@@ -104,20 +106,24 @@ internal static class Program
             last = s;
             cpuH.Add(s.CpuPct);
             ramH.Add(s.RamPct);
-            for (int j = 0; j < s.Gpus.Count; j++) gpuH[j].Add(s.Gpus[j].LoadPct);
+            TrayApp.AddGpuSamples(gpuH, s);
+            netUpH.Add(UI.TrayBar.NetFraction(s.NetUpBps) * 100);
+            netDownH.Add(UI.TrayBar.NetFraction(s.NetDownBps) * 100);
             sb.Append($"CPU {s.CpuPct:0.0}% temp={s.CpuTempC?.ToString("0") ?? "-"} | RAM {s.RamPct:0.0}% {s.RamUsedGB:0.0}/{s.RamTotalGB:0.0} GB | pawnio={s.PawnIoInstalled}");
             foreach (var g in s.Gpus)
                 sb.Append($" | {g.Info.ShortName} {g.LoadPct:0.0}% temp={g.TempC?.ToString("0") ?? (g.TempSkippedIdle ? "idle" : "-")} mem={g.MemUsedGB:0.00}/{g.MemTotalGB:0.0} GB");
+            sb.Append($" | net down={TrayApp.FormatRate(s.NetDownBps)} up={TrayApp.FormatRate(s.NetUpBps)} [{s.NetAdapters}]");
             sb.AppendLine();
         }
+        sb.AppendLine($"MIB_IF_ROW2 size: {Sensors.NetworkCounters.RowSize} (expected 1352)");
         File.WriteAllText(outPath, sb.ToString());
 
         // Images: tray icon at common sizes (both taskbar themes, upscaled 8x) and the detail panel.
         string dir = Path.GetDirectoryName(Path.GetFullPath(outPath))!;
-        var values = new List<float> { last!.CpuPct };
-        values.AddRange(last.Gpus.Select(g => g.LoadPct));
-        values.Add(last.RamPct);
-        values[0] = 92; // force one red bar so all colors show up
+
+        var values = TrayApp.BuildBars(last!, last!.Gpus.Count);
+        values[0] = UI.TrayBar.ForLoad(92); // force one red bar so all colors show up
+        values[^1] = UI.TrayBar.ForNetwork(300 * 1024, 8 * 1024 * 1024); // sample traffic so both halves show
         foreach (int size in new[] { 16, 20, 24, 32 })
             foreach (bool light in new[] { true, false })
             {
@@ -134,7 +140,7 @@ internal static class Program
             }
 
         using var panel = new UI.DetailPanel();
-        var rows = TrayApp.BuildRows(last, TrayApp.ReadCpuName(), cpuH, gpuH, ramH);
+        var rows = TrayApp.BuildRows(last, TrayApp.ReadCpuName(), cpuH, gpuH, ramH, netUpH, netDownH);
         using var pbmp = panel.RenderToBitmap(rows, 1.5f);
         pbmp.Save(Path.Combine(dir, "panel.png"));
     }

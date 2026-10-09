@@ -16,6 +16,8 @@ public static class Theme
 
     public static readonly Color AccentCpu = Color.FromArgb(74, 158, 255);
     public static readonly Color AccentRam = Color.FromArgb(255, 160, 70);
+    public static readonly Color NetDown = Color.FromArgb(64, 196, 255);
+    public static readonly Color NetUp = Color.FromArgb(176, 128, 255);
     public static readonly Color[] AccentGpus =
     [
         Color.FromArgb(76, 194, 110),
