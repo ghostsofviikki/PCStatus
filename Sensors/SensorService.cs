@@ -48,9 +48,10 @@ public sealed class SensorService : IDisposable
             _lhmCpu = cpuComputer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
             _lhmCpuReady = true;
         }
-        catch
+        catch (Exception ex)
         {
             // CPU temperature simply stays unavailable.
+            Log.Error("opening CPU sensors", ex);
         }
     }
 
@@ -108,9 +109,10 @@ public sealed class SensorService : IDisposable
             if (old != null)
                 Task.Delay(TimeSpan.FromSeconds(3)).ContinueWith(_ => { try { old.Computer.Close(); } catch { } });
         }
-        catch
+        catch (Exception ex)
         {
             // GPU temperatures simply stay unavailable.
+            Log.Error("opening GPU sensors", ex);
         }
         finally
         {
@@ -128,6 +130,7 @@ public sealed class SensorService : IDisposable
         if (fresh == null) return;
         if (fresh.Select(g => g.Luid).SequenceEqual(_gpus.Select(g => g.Luid))) return;
 
+        Log.Write($"GPUs changed: [{string.Join(", ", _gpus.Select(g => g.ShortName))}] -> [{string.Join(", ", fresh.Select(g => g.ShortName))}]");
         _gpus = fresh;
         foreach (var gone in _lastGpuTemp.Keys.Where(l => fresh.All(g => g.Luid != l)).ToList())
             _lastGpuTemp.Remove(gone);

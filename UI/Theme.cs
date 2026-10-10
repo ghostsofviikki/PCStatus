@@ -28,6 +28,9 @@ public static class Theme
 
     public static Color LoadColor(float pct) => pct >= 85 ? Red : pct >= 60 ? Yellow : Green;
 
+    /// <summary>RAM/VRAM half of a split tray bar: the RAM accent, red when nearly full.</summary>
+    public static Color MemoryColor(float pct) => pct >= 90 ? Red : AccentRam;
+
     /// <summary>True when the taskbar uses the light theme.</summary>
     public static bool TaskbarIsLight()
     {

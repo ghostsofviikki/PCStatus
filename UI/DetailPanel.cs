@@ -5,7 +5,8 @@ namespace PCStatus.UI;
 
 /// <summary>
 /// One panel row. With <paramref name="DownHistory"/> set, the sparkline is mirrored like the tray bar:
-/// <paramref name="History"/> (upload) above the centre line in <paramref name="Accent"/>, download below in <paramref name="DownAccent"/>.
+/// <paramref name="History"/> (load or upload) above the centre line in <paramref name="Accent"/>,
+/// <paramref name="DownHistory"/> (RAM / VRAM or download) below in <paramref name="DownAccent"/>.
 /// </summary>
 public sealed record PanelRow(string Title, string Value, string Detail, History History, Color Accent, float Load,
     History? DownHistory = null, Color DownAccent = default);
@@ -205,7 +206,7 @@ public sealed class DetailPanel : Form
             g.DrawLines(line, pts);
     }
 
-    /// <summary>Upload above the centre line, download below; values are 0–100 (already log-scaled).</summary>
+    /// <summary>One series above the centre line, the other below; values are 0–100 (network already log-scaled).</summary>
     private static void DrawMirroredSparkline(Graphics g, RectangleF r, History up, Color upColor, History down, Color downColor, float s)
     {
         using (var bg = new SolidBrush(Color.FromArgb(26, 26, 26)))

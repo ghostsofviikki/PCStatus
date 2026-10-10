@@ -10,10 +10,11 @@ Click the icon for the detail panel:
 
 ## Features
 
-- **Tray icon with live bars:** CPU, one bar per GPU, RAM. Each bar is green, yellow or red by load, and updates every second.
+- **Tray icon with live bars:** CPU, one bar per GPU, network. Load is green, yellow or red, and everything updates every second. Hover the icon for a quick summary including RAM and VRAM use.
+- **Memory with its device:** the CPU bar shows load above the middle and system RAM below it; each GPU bar shows its load above its own VRAM (shared memory for integrated GPUs). RAM/VRAM turns red above 90%.
 - **Network in a single bar:** upload grows up from the middle (violet) and download grows down from it (blue). It uses a log scale from 1 KB/s to 100 MB/s, so light browsing and big downloads both show. Only physical adapters are counted, so VPNs and virtual switches aren't double-counted.
 - **Every GPU shown separately:** for example an integrated Intel Arc *and* a dedicated or external NVIDIA RTX. Works with any number of GPUs, including none. GPUs that are plugged in or removed while it runs (eGPUs) appear and disappear within a few seconds.
-- **Detail panel:** click the icon to see usage %, CPU and GPU temperatures, VRAM / shared GPU memory, download and upload speed, and a 60-second history graph for each.
+- **Detail panel:** click the icon to see usage %, CPU and GPU temperatures, RAM and VRAM / shared GPU memory, download and upload speed, and a 60-second history graph for each (load above the line, memory below).
 - **Doesn't wake a sleeping laptop dGPU:** GPU temperature is only read while the GPU is in use.
 - **Start with Windows:** optional, with no UAC prompt at every logon.
 - **Lightweight:** about 50 MB RAM and well under 1% CPU.
@@ -42,7 +43,7 @@ On a standard (non-admin) account everything works except CPU temperature.
 |---|---|
 | Hover the tray icon | Tooltip with all values, e.g. `CPU 23% 54° \| Arc 4% \| RTX 12% 51° \| RAM 48% \| ↓ 12.3 MB/s ↑ 450 KB/s` |
 | Left-click | Open / close the detail panel |
-| Right-click | *Start with Windows* toggle, *Exit* |
+| Right-click | *Tray icon style*, *Start with Windows* toggle, *Exit* |
 
 ## Building from source
 

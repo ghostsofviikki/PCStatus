@@ -3,16 +3,24 @@ using System.Runtime.InteropServices;
 
 namespace PCStatus.UI;
 
+/// <summary>Two values sharing one bar: the top one grows up from the middle, the bottom one grows down (fractions 0–1).</summary>
+public readonly record struct BarHalves(float Top, Color TopColor, float Bottom, Color BottomColor);
+
 /// <summary>
-/// One bar in the tray icon: either a load bar (0–100, filled from the bottom) or a split network bar
-/// (upload grows up from the middle, download grows down from it; fractions 0–1).
+/// One bar in the tray icon: either a load bar (0–100, filled from the bottom) or a split bar
+/// (network upload/download, or load/memory).
 /// </summary>
-public readonly record struct TrayBar(float Load, float? UpFraction = null, float? DownFraction = null)
+public readonly record struct TrayBar(float Load, BarHalves? Halves = null)
 {
     public static TrayBar ForLoad(float pct) => new(pct);
-    public static TrayBar ForNetwork(double upBps, double downBps) => new(0, NetFraction(upBps), NetFraction(downBps));
 
-    public bool IsNetwork => UpFraction.HasValue;
+    public static TrayBar ForNetwork(double upBps, double downBps) =>
+        new(0, new BarHalves(NetFraction(upBps), Theme.NetUp, NetFraction(downBps), Theme.NetDown));
+
+    /// <summary>Load on top (load colors), memory use below.</summary>
+    public static TrayBar ForLoadAndMemory(float loadPct, float memPct) =>
+        new(loadPct, new BarHalves(Math.Clamp(loadPct, 0, 100) / 100f, Theme.LoadColor(loadPct),
+            Math.Clamp(memPct, 0, 100) / 100f, Theme.MemoryColor(memPct)));
 
     /// <summary>Log scale: 1 KB/s = 0, 100 MB/s = 1, so light and heavy traffic are both visible.</summary>
     public static float NetFraction(double bytesPerSec)
@@ -23,7 +31,7 @@ public readonly record struct TrayBar(float Load, float? UpFraction = null, floa
     }
 }
 
-/// <summary>Draws one vertical bar per metric into a tray-sized icon.</summary>
+/// <summary>Draws the metrics into a tray-sized icon as vertical bars.</summary>
 public sealed class TrayIconRenderer : IDisposable
 {
     private IntPtr _lastHandle;
@@ -31,7 +39,8 @@ public sealed class TrayIconRenderer : IDisposable
 
     public Icon Render(IReadOnlyList<TrayBar> bars, bool lightTaskbar)
     {
-        using var bmp = RenderBitmap(bars, lightTaskbar, SystemInformation.SmallIconSize.Width);
+        int size = SystemInformation.SmallIconSize.Width;
+        using var bmp = RenderBitmap(bars, lightTaskbar, size);
 
         // Icon.FromHandle doesn't own the HICON. The caller is still showing the previous icon
         // while this one is created, so free the one from two renders ago.
@@ -60,21 +69,21 @@ public sealed class TrayIconRenderer : IDisposable
             int used = n * barW + (n - 1) * gap;
             int x = (size - used) / 2;
 
-            using var track = new SolidBrush(lightTaskbar ? Color.FromArgb(55, 0, 0, 0) : Color.FromArgb(70, 255, 255, 255));
+            using var track = new SolidBrush(TrackColor(lightTaskbar));
             using var midLine = new SolidBrush(lightTaskbar ? Color.FromArgb(110, 0, 0, 0) : Color.FromArgb(130, 255, 255, 255));
             foreach (var bar in bars)
             {
                 g.FillRectangle(track, x, 0, barW, size);
-                if (bar.IsNetwork)
+                if (bar.Halves is { } halves)
                 {
                     int mid = size / 2;
-                    int upH = Height(bar.UpFraction!.Value, mid);
-                    int downH = Height(bar.DownFraction!.Value, size - mid);
-                    using var up = new SolidBrush(Theme.NetUp);
-                    using var down = new SolidBrush(Theme.NetDown);
+                    int upH = Height(halves.Top, mid);
+                    int downH = Height(halves.Bottom, size - mid);
+                    using var up = new SolidBrush(halves.TopColor);
+                    using var down = new SolidBrush(halves.BottomColor);
                     g.FillRectangle(up, x, mid - upH, barW, upH);
                     g.FillRectangle(down, x, mid, barW, downH);
-                    // Faint centre line so the network bar is recognisable even when idle.
+                    // Faint centre line so a split bar is recognisable even when idle.
                     if (upH == 0 && downH == 0)
                         g.FillRectangle(midLine, x, mid, barW, 1);
                 }
@@ -90,6 +99,9 @@ public sealed class TrayIconRenderer : IDisposable
         }
         return bmp;
     }
+
+    private static Color TrackColor(bool lightTaskbar) =>
+        lightTaskbar ? Color.FromArgb(55, 0, 0, 0) : Color.FromArgb(70, 255, 255, 255);
 
     private static int Height(float fraction, int max) =>
         fraction <= 0 ? 0 : Math.Max(1, (int)Math.Round(fraction * max));

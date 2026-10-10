@@ -19,12 +19,16 @@ public static class Autostart
         // Defaults for schtasks-created tasks would stop the app on battery and after 72 h, so use XML.
         // Trigger on any user's logon and run as that user (BUILTIN\Users), elevated where they're an admin.
         // This also works when the installer ran under a different admin account than the one logging in.
+        // The unlock trigger brings the app back if anything ended it while the PC was locked; when it's already
+        // running, IgnoreNew (or the app's single-instance check) makes it a no-op. RestartOnFailure only retries
+        // a failed launch, not a process that was killed later.
         string xml = $"""
             <?xml version="1.0" encoding="UTF-16"?>
             <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
               <RegistrationInfo><Description>PCStatus tray monitor</Description></RegistrationInfo>
               <Triggers>
                 <LogonTrigger><Enabled>true</Enabled><Delay>PT5S</Delay></LogonTrigger>
+                <SessionStateChangeTrigger><Enabled>true</Enabled><StateChange>SessionUnlock</StateChange></SessionStateChangeTrigger>
               </Triggers>
               <Principals>
                 <Principal id="Author">
@@ -40,6 +44,7 @@ public static class Autostart
                 <AllowHardTerminate>true</AllowHardTerminate>
                 <StartWhenAvailable>false</StartWhenAvailable>
                 <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+                <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
                 <Enabled>true</Enabled>
                 <Priority>7</Priority>
               </Settings>

@@ -27,9 +27,29 @@ internal static class Program
             return;
         }
 
-        using var mutex = new Mutex(true, @"Local\PCStatus.SingleInstance", out bool isFirst);
-        if (!isFirst)
+        Mutex mutex;
+        bool isFirst;
+        try
+        {
+            mutex = new Mutex(true, @"Local\PCStatus.SingleInstance", out isFirst);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Held by an elevated instance we can't open: it's already running.
             return;
+        }
+        using var _ = mutex;
+        if (!isFirst)
+            return; // already running; this is normal when the unlock trigger fires
+
+        Log.Startup();
+        // An unexpected error must never close the tray app: log it and carry on.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Log.Error("UI thread", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Log.Write($"FATAL unhandled exception (terminating={e.IsTerminating}): {e.ExceptionObject}");
+        TaskScheduler.UnobservedTaskException += (_, e) => { Log.Error("background task", e.Exception); e.SetObserved(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Log.Write($"EXIT code={Environment.ExitCode}");
 
         ApplicationConfiguration.Initialize();
         SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
@@ -96,6 +116,7 @@ internal static class Program
         var cpuH = new History();
         var ramH = new History();
         var gpuH = new Dictionary<long, History>();
+        var gpuMemH = new Dictionary<long, History>();
         var netUpH = new History();
         var netDownH = new History();
         Sensors.SensorSnapshot? last = null;
@@ -106,7 +127,7 @@ internal static class Program
             last = s;
             cpuH.Add(s.CpuPct);
             ramH.Add(s.RamPct);
-            TrayApp.AddGpuSamples(gpuH, s);
+            TrayApp.AddGpuSamples(gpuH, gpuMemH, s);
             netUpH.Add(UI.TrayBar.NetFraction(s.NetUpBps) * 100);
             netDownH.Add(UI.TrayBar.NetFraction(s.NetDownBps) * 100);
             sb.Append($"CPU {s.CpuPct:0.0}% temp={s.CpuTempC?.ToString("0") ?? "-"} | RAM {s.RamPct:0.0}% {s.RamUsedGB:0.0}/{s.RamTotalGB:0.0} GB | pawnio={s.PawnIoInstalled}");
@@ -122,7 +143,8 @@ internal static class Program
         string dir = Path.GetDirectoryName(Path.GetFullPath(outPath))!;
 
         var values = TrayApp.BuildBars(last!, last!.Gpus.Count);
-        values[0] = UI.TrayBar.ForLoad(92); // force one red bar so all colors show up
+        // Force one red bar so all colors show up.
+        values[0] = UI.TrayBar.ForLoadAndMemory(92, last.RamPct);
         values[^1] = UI.TrayBar.ForNetwork(300 * 1024, 8 * 1024 * 1024); // sample traffic so both halves show
         foreach (int size in new[] { 16, 20, 24, 32 })
             foreach (bool light in new[] { true, false })
@@ -140,7 +162,8 @@ internal static class Program
             }
 
         using var panel = new UI.DetailPanel();
-        var rows = TrayApp.BuildRows(last, TrayApp.ReadCpuName(), cpuH, gpuH, ramH, netUpH, netDownH);
+        var rows = TrayApp.BuildRows(last!, TrayApp.ReadCpuName(), cpuH, gpuH, gpuMemH, ramH, netUpH, netDownH);
+        File.AppendAllText(outPath, "\nTooltip:\n" + TrayApp.BuildTooltip(last!) + "\n");
         using var pbmp = panel.RenderToBitmap(rows, 1.5f);
         pbmp.Save(Path.Combine(dir, "panel.png"));
     }
